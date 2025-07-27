@@ -4,12 +4,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProfile } from '@/hooks/useProfile';
 import { useToast } from '@/hooks/use-toast';
-import { ShoppingCart, Users, TrendingUp, Star } from 'lucide-react';
+import { ShoppingCart, Users, TrendingUp, Star, Plus, Package } from 'lucide-react';
 import Navbar from '@/components/Navbar';
+import Cart from '@/components/Cart';
+import GroupOrderModal from '@/components/GroupOrderModal';
 
 interface Material {
   id: string;
@@ -42,6 +45,11 @@ const VendorDashboard = () => {
   const [groupOrders, setGroupOrders] = useState<GroupOrder[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [loading, setLoading] = useState(true);
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [isGroupOrderModalOpen, setIsGroupOrderModalOpen] = useState(false);
+  const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
+  const [orderSummary, setOrderSummary] = useState<string>('');
+  const [showOrderSummary, setShowOrderSummary] = useState(false);
 
   useEffect(() => {
     fetchMaterials();
@@ -87,6 +95,54 @@ const VendorDashboard = () => {
     }
   };
 
+  const addToCart = async (materialId: string, quantity: number = 1) => {
+    if (!user) return;
+
+    try {
+      // Check if item already exists in cart
+      const { data: existingItem } = await supabase
+        .from('cart_items' as any)
+        .select('*')
+        .eq('vendor_id', user.id)
+        .eq('material_id', materialId)
+        .maybeSingle();
+
+      if (existingItem && (existingItem as any).quantity) {
+        // Update quantity if item exists
+        const { error } = await supabase
+          .from('cart_items' as any)
+          .update({ quantity: (existingItem as any).quantity + quantity })
+          .eq('id', (existingItem as any).id);
+
+        if (error) throw error;
+      } else {
+        // Insert new item
+        const { error } = await supabase
+          .from('cart_items' as any)
+          .insert({
+            vendor_id: user.id,
+            material_id: materialId,
+            quantity
+          });
+
+        if (error) throw error;
+      }
+
+      const material = materials.find(m => m.id === materialId);
+      toast({
+        title: "Added to cart!",
+        description: `${quantity} ${material?.unit} of ${material?.name} added to cart`
+      });
+    } catch (error) {
+      console.error('Error adding to cart:', error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to add to cart"
+      });
+    }
+  };
+
   const placeIndividualOrder = async (materialId: string, quantity: number) => {
     if (!user || !profile) return;
 
@@ -94,23 +150,49 @@ const VendorDashboard = () => {
       const material = materials.find(m => m.id === materialId);
       if (!material) return;
 
-      const { error } = await supabase
-        .from('orders')
-        .insert({
-          vendor_id: user.id,
-          supplier_id: material.supplier_id,
-          material_id: materialId,
-          quantity,
-          total_price: material.price * quantity,
-          type: 'individual'
+      // Show order summary first
+      const summary = `Order Summary:
+Material: ${material.name}
+Quantity: ${quantity} ${material.unit}
+Price per unit: ₹${material.price}
+Total: ₹${material.price * quantity}
+Supplier: ${material.supplier_id}`;
+
+      setOrderSummary(summary);
+      setShowOrderSummary(true);
+
+      // After user confirms, place the order
+      const confirmOrder = async () => {
+        const { error } = await supabase
+          .from('orders')
+          .insert({
+            vendor_id: user.id,
+            supplier_id: material.supplier_id,
+            material_id: materialId,
+            quantity,
+            total_price: material.price * quantity,
+            type: 'individual'
+          });
+
+        if (error) throw error;
+
+        // Log the order summary
+        await supabase
+          .from('order_summary_logs' as any)
+          .insert({
+            vendor_id: user.id,
+            order_id: '', // We could get this from the insert response
+            summary
+          });
+
+        toast({
+          title: "Order placed!",
+          description: `Successfully ordered ${quantity} ${material.unit} of ${material.name}`
         });
+        setShowOrderSummary(false);
+      };
 
-      if (error) throw error;
-
-      toast({
-        title: "Order placed!",
-        description: `Successfully ordered ${quantity} ${material.unit} of ${material.name}`
-      });
+      return confirmOrder;
     } catch (error) {
       console.error('Error placing order:', error);
       toast({
@@ -121,7 +203,14 @@ const VendorDashboard = () => {
     }
   };
 
-  const joinGroupOrder = async (groupOrderId: string) => {
+  const confirmIndividualOrder = async () => {
+    const confirmOrder = await placeIndividualOrder(selectedMaterial?.id || '', 1);
+    if (confirmOrder) {
+      await confirmOrder();
+    }
+  };
+
+  const joinGroupOrder = async (groupOrderId: string, quantity: number = 1) => {
     if (!user) return;
 
     try {
@@ -138,19 +227,31 @@ const VendorDashboard = () => {
         return;
       }
 
-      const { error } = await supabase
+      // Add to group_order_participants table
+      const { error: participantError } = await supabase
+        .from('group_order_participants' as any)
+        .insert({
+          group_order_id: groupOrderId,
+          vendor_id: user.id,
+          quantity
+        });
+
+      if (participantError) throw participantError;
+
+      // Update group order totals
+      const { error: updateError } = await supabase
         .from('group_orders')
         .update({
           participants: [...groupOrder.participants, user.id],
-          total_quantity: groupOrder.total_quantity + 1
+          total_quantity: groupOrder.total_quantity + quantity
         })
         .eq('id', groupOrderId);
 
-      if (error) throw error;
+      if (updateError) throw updateError;
 
       toast({
         title: "Joined group order!",
-        description: "You have successfully joined the group order"
+        description: `You have joined with ${quantity} ${groupOrder.materials.unit}`
       });
 
       fetchGroupOrders();
@@ -162,6 +263,11 @@ const VendorDashboard = () => {
         description: "Failed to join group order"
       });
     }
+  };
+
+  const openGroupOrderModal = (material: Material) => {
+    setSelectedMaterial(material);
+    setIsGroupOrderModalOpen(true);
   };
 
   const filteredMaterials = materials.filter(material =>
@@ -185,9 +291,19 @@ const VendorDashboard = () => {
       <Navbar />
       
       <div className="max-w-7xl mx-auto p-6">
-        <div className="mb-8">
-          <h2 className="text-3xl font-bold mb-2">Welcome back, {profile?.full_name}!</h2>
-          <p className="text-muted-foreground">Manage your orders and discover new suppliers</p>
+        <div className="mb-8 flex justify-between items-center">
+          <div>
+            <h2 className="text-3xl font-bold mb-2">Welcome back, {profile?.full_name}!</h2>
+            <p className="text-muted-foreground">Manage your orders and discover new suppliers</p>
+          </div>
+          <Button 
+            onClick={() => setIsCartOpen(true)}
+            variant="warm"
+            className="flex items-center gap-2"
+          >
+            <ShoppingCart className="h-4 w-4" />
+            View Cart
+          </Button>
         </div>
 
         <Tabs defaultValue="materials" className="space-y-6">
@@ -235,12 +351,33 @@ const VendorDashboard = () => {
                           <span>Stock:</span>
                           <span className="font-medium">{material.stock} {material.unit}</span>
                         </div>
+                        <div className="flex gap-2">
+                          <Button 
+                            onClick={() => addToCart(material.id, 1)}
+                            variant="outline"
+                            className="flex-1"
+                          >
+                            <Plus className="h-4 w-4 mr-1" />
+                            Add to Cart
+                          </Button>
+                          <Button 
+                            onClick={() => {
+                              setSelectedMaterial(material);
+                              placeIndividualOrder(material.id, 1);
+                            }}
+                            variant="warm"
+                            className="flex-1"
+                          >
+                            Quick Order
+                          </Button>
+                        </div>
                         <Button 
-                          onClick={() => placeIndividualOrder(material.id, 1)}
+                          onClick={() => openGroupOrderModal(material)}
+                          variant="success"
                           className="w-full"
-                          variant="warm"
                         >
-                          Order 1 {material.unit}
+                          <Users className="h-4 w-4 mr-1" />
+                          Start Group Order
                         </Button>
                       </div>
                     </CardContent>
@@ -339,6 +476,50 @@ const VendorDashboard = () => {
             </Card>
           </TabsContent>
         </Tabs>
+
+        {/* Cart Modal */}
+        <Cart 
+          isOpen={isCartOpen} 
+          onClose={() => setIsCartOpen(false)}
+          onRefresh={() => {
+            fetchMaterials();
+            fetchGroupOrders();
+          }}
+        />
+
+        {/* Group Order Modal */}
+        <GroupOrderModal
+          isOpen={isGroupOrderModalOpen}
+          onClose={() => setIsGroupOrderModalOpen(false)}
+          material={selectedMaterial}
+          onSuccess={() => {
+            fetchGroupOrders();
+            setIsGroupOrderModalOpen(false);
+          }}
+        />
+
+        {/* Order Summary Dialog */}
+        <Dialog open={showOrderSummary} onOpenChange={setShowOrderSummary}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Order Summary</DialogTitle>
+              <DialogDescription>
+                Please review your order before confirming
+              </DialogDescription>
+            </DialogHeader>
+            <div className="whitespace-pre-wrap text-sm bg-secondary/50 p-4 rounded">
+              {orderSummary}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowOrderSummary(false)}>
+                Cancel
+              </Button>
+              <Button onClick={confirmIndividualOrder} variant="warm">
+                Confirm Order
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

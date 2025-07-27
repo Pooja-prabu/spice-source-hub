@@ -143,14 +143,32 @@ const SupplierDashboard = () => {
     }
   };
 
-  const updateOrderStatus = async (orderId: string, status: string) => {
+  const updateOrderStatus = async (orderId: string, status: string, note?: string) => {
+    if (!user) return;
+
     try {
-      const { error } = await supabase
+      // Update order status
+      const { error: orderError } = await supabase
         .from('orders')
         .update({ status })
         .eq('id', orderId);
 
-      if (error) throw error;
+      if (orderError) throw orderError;
+
+      // Log the response
+      const { error: responseError } = await supabase
+        .from('order_responses' as any)
+        .insert({
+          order_id: orderId,
+          supplier_id: user.id,
+          status,
+          note: note || `Order ${status}`
+        });
+
+      if (responseError) {
+        console.error('Error logging response:', responseError);
+        // Don't fail the whole operation for logging errors
+      }
 
       toast({
         title: "Order updated!",
@@ -397,14 +415,14 @@ const SupplierDashboard = () => {
                             <Button 
                               size="sm" 
                               variant="success"
-                              onClick={() => updateOrderStatus(order.id, 'confirmed')}
+                              onClick={() => updateOrderStatus(order.id, 'confirmed', 'Order accepted by supplier')}
                             >
                               Accept Order
                             </Button>
                             <Button 
                               size="sm" 
                               variant="destructive"
-                              onClick={() => updateOrderStatus(order.id, 'cancelled')}
+                              onClick={() => updateOrderStatus(order.id, 'cancelled', 'Order declined by supplier')}
                             >
                               Decline
                             </Button>
@@ -415,7 +433,7 @@ const SupplierDashboard = () => {
                           <Button 
                             size="sm" 
                             variant="warm"
-                            onClick={() => updateOrderStatus(order.id, 'delivered')}
+                            onClick={() => updateOrderStatus(order.id, 'delivered', 'Order marked as delivered')}
                           >
                             Mark as Delivered
                           </Button>
